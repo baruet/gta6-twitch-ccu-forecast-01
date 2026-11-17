@@ -7,13 +7,36 @@ normalise it by its own hour-1 print (log ratios ln(viewers_h / viewers_1),
 h = 2..24), and aggregate across comparables with size-weighted empirical
 quantiles: a comparable whose hour-1 print is close to the target case's
 hour-1 print (in log space) counts more, because launch size shapes the
-day's curve. The forecast for hour h is then
+day's curve. The forecast's centre for hour h is the size-weighted median
+of the log ratios at h:
 
-    q_tau(h) = p1 * exp(weighted_tau_quantile of log ratios at h),
+    q50(h) = p1 * exp(weighted median of log ratios at h),
 
-where p1 is the case's hour-1 print. No launch's answer is ever hard-coded:
-the same code runs unchanged on the practice cases and on the final GTA VI
-case, learning only from whatever comparables the case file carries.
+where p1 is the case's hour-1 print.
+
+The spread is conformal, calibrated per hour from nested leave-one-out
+residuals: for each comparable j, its median at hour h is forecast from the
+other curves (weighted by closeness to j's own hour-1 print) and the
+residual -- how far j's actual curve sat from that forecast -- is recorded.
+The tau-quantile of those residuals, weighted by closeness to the case's p1,
+is added to the median in log space:
+
+    q_tau(h) = p1 * exp(median(h) + weighted tau-quantile of residuals at h).
+
+So the spread measures what this forecaster actually gets wrong, per hour,
+rather than assuming the raw dispersion across launches equals the forecast
+error; and it is self-calibrating, which matters most when the target's
+hour-1 print sits far outside the comparable pool (as GTA VI's will).
+Leave-one-out cross-validation over the kit's 22 sane-shaped comparable
+curves: pinball loss 0.206 (typical miss 39.2%, 90% coverage 0.870), against
+0.212 for the raw-dispersion spread and 0.285 for the persistence baseline.
+The gain over the raw spread is within noise on 22 targets (paired t -0.75),
+so it is adopted on the strength of the calibration argument and the fact
+that it improves loss, miss and coverage together, not on a single number.
+
+No launch's answer is ever hard-coded: the same code runs unchanged on the
+practice cases and on the final GTA VI case, learning only from whatever
+comparables the case file carries.
 
 Two guards keep the shape honest. A comparable only enters the fit when its
 release-day curve is complete (all 24 hourly rows present, viewers > 0) and
@@ -134,6 +157,17 @@ def comparable_curve(comp):
     return v1, [math.log(hourly[h] / v1) for h in range(24)]
 
 
+def size_weight(p1, v1):
+    """Gaussian kernel weight: how close comparable hour-1 print v1 is to p1.
+
+    In log space, width SIZE_SIGMA: a comparable whose launch is the same
+    size as the target counts most, because launch size shapes the day's
+    curve. Always positive, so weighted quantiles never divide by zero.
+    """
+    d = math.log(p1) - math.log(v1)
+    return math.exp(-(d * d) / (2 * SIZE_SIGMA ** 2))
+
+
 def forecast_case(case, name):
     """Forecast one case: {"hours": [{"hour": h, "q": [...]}, ...]}."""
     if case["levels"] != LEVELS:
@@ -148,16 +182,43 @@ def forecast_case(case, name):
         parsed = comparable_curve(comp)
         if parsed is None:
             continue
-        v1, logr = parsed
-        weight = math.exp(-((math.log(p1) - math.log(v1)) ** 2) / (2 * SIZE_SIGMA ** 2))
-        curves.append((logr, weight))
+        curves.append(parsed)
 
     hours = []
     for row in case["forecast"]:
         h = row["hour"]
         if curves:
-            pairs = [(logr[h - 1], w) for logr, w in curves]
-            qs = [round2(p1 * math.exp(weighted_quantile(pairs, tau))) for tau in LEVELS]
+            if len(curves) == 1:
+                # One curve: every quantile is that curve's value.
+                qs = [round2(p1 * math.exp(curves[0][1][h - 1])) for _ in LEVELS]
+            else:
+                # Centre: size-weighted median of the log ratios at hour h.
+                pairs = [(logr[h - 1], size_weight(p1, v1)) for v1, logr in curves]
+                med = weighted_quantile(pairs, 0.5)
+                # Spread: conformal, from nested leave-one-out residuals.
+                # For each comparable j, forecast its median at hour h from
+                # the other curves (weighted by closeness to j's own hour-1
+                # print) and record how far j's actual curve sat from that
+                # forecast. The tau-quantile of those residuals, weighted by
+                # closeness to the case's p1, is the spread around the
+                # median: it measures what this forecaster actually gets
+                # wrong, per hour, instead of assuming the raw dispersion
+                # across launches equals the forecast error. The target
+                # case itself never enters the calibration: every residual
+                # comes from a comparable the nested forecast did not see.
+                resid = []
+                for j, (v1j, logrj) in enumerate(curves):
+                    rest = [
+                        (logrk[h - 1], size_weight(v1j, v1k))
+                        for k, (v1k, logrk) in enumerate(curves)
+                        if k != j
+                    ]
+                    med_j = weighted_quantile(rest, 0.5)
+                    resid.append((logrj[h - 1] - med_j, size_weight(p1, v1j)))
+                qs = [
+                    round2(p1 * math.exp(med + weighted_quantile(resid, tau)))
+                    for tau in LEVELS
+                ]
         else:
             # No usable comparable: persistence fallback (house baseline).
             qs = [round2(p1 * math.exp(z * FALLBACK_SIGMA * math.sqrt(h - 1))) for z in Z]

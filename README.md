@@ -21,12 +21,21 @@ their release day:
 
 1. Each comparable's release-day curve is normalised by its own hour-1
    print: log ratios `ln(viewers_h / viewers_1)` for hours 2..24.
-2. Curves are aggregated per hour with **size-weighted empirical
-   quantiles**: a comparable whose hour-1 print is close to the target
-   case's hour-1 print (in log space, Gaussian kernel width 1.0) counts
-   more, because launch size shapes the day's curve.
-3. Forecast: `q_tau(h) = p1 * exp(weighted tau-quantile of log ratios)`,
-   where `p1` is the case's hour-1 print.
+2. The centre for each hour is the **size-weighted median** of the log
+   ratios at that hour: a comparable whose hour-1 print is close to the
+   target case's hour-1 print (in log space, Gaussian kernel width 1.0)
+   counts more, because launch size shapes the day's curve.
+3. The spread is **conformal, calibrated per hour from nested
+   leave-one-out residuals**: each comparable's median at hour h is
+   forecast from the other curves (weighted by closeness to its own
+   hour-1 print), and the residual — how far its actual curve sat from
+   that forecast — is recorded. Forecast:
+   `q_tau(h) = p1 * exp(median(h) + weighted tau-quantile of residuals
+   at h)`, where `p1` is the case's hour-1 print. The spread therefore
+   measures what this forecaster actually gets wrong per hour, instead of
+   assuming the raw dispersion across launches equals the forecast error,
+   and it is self-calibrating — which matters most when the target's
+   hour-1 print sits far outside the comparable pool, as GTA VI's will.
 
 Two guards keep the shape honest. A comparable enters the fit only when its
 release-day curve is complete (all 24 hourly rows, viewers > 0) and
@@ -63,16 +72,20 @@ score pinball loss vs its actual hours 2–24):
 
 | Model | Pinball loss | Typical miss | 90% coverage |
 |---|---|---|---|
-| This model (size-weighted empirical quantiles) | **0.212** | 41.3% | 0.846 |
+| This model (size-weighted median + conformal spread) | **0.2062** | 39.2% | 0.870 |
+| Previous model (size-weighted empirical quantiles) | 0.2119 | 41.3% | 0.846 |
 | House baseline (persistence) | 0.285 | 59.4% | 0.820 |
 
-26% lower loss than the baseline on the same population. The house
-baseline's published practice loss is 0.387; the prize-zone bar on practice
-is rank 20 at 0.114 — but the prize is decided on the final (the real GTA VI
-day), where no score can be measured in advance. Variants tried and rejected
-on CV: unweighted quantiles (0.233), median + normal spread (0.235–0.237),
-conditioning on launch jump / pre-release diurnal profile (0.218–0.273,
-worse), spread shrinkage (no gain).
+28% lower loss than the baseline on the same population (0.2062 vs 0.285).
+The gain over the previous raw-dispersion spread is within noise on 22
+targets (paired t -0.75), so the conformal spread is adopted on the
+strength of the calibration argument and because it improves loss, miss
+and coverage together, not on a single number. The house baseline's
+published practice loss is 0.387; the prize-zone bar on practice is rank
+20 at 0.114 — but the prize is decided on the final (the real GTA VI day),
+where no score can be measured in advance. Variants tried and rejected on
+CV: unweighted conformal (0.2096), sigma 0.75 (0.2113), spread scaling
+(0.2126–0.2220), weight trimming (0.2159–0.2245).
 
 ## Files
 
